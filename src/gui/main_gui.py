@@ -1,181 +1,149 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import os
+from tkinter import ttk, scrolledtext, filedialog
 import threading
-import sys
-import traceback
-
-# Ensure the src directory is in the Python path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-src_dir = os.path.abspath(os.path.join(script_dir, '..'))
-if src_dir not in sys.path:
-    sys.path.append(src_dir)
-
-# Import modules after updating path
-try:
-    from audio_processing import load_audio, SUPPORTED_FORMATS
-    from speech_to_text import transcribe_audio
-except ImportError as e:
-    print(f"Error importing project modules: {e}")
-    print(f"sys.path: {sys.path}")
-    messagebox.showerror("Import Error", 
-        f"Failed to import necessary modules: {e}\nPlease ensure the project structure is correct and dependencies are installed.")
-    sys.exit(1)
+from typing import Callable, List, Optional
+from dataclasses import asdict
+# Use relative imports within the package structure
+from ..speech_to_text.transcriber import TranscriptSegment
+from ..speaker_diarization.diarizer import SpeakerDiarizer
 
 class MeetingTranscriberApp:
-    def __init__(self, root):
+    """Main GUI application for the Meeting Transcriber."""
+    
+    def __init__(self, root, process_callback: Optional[Callable] = None):
+        """Initialize the GUI application.
+        
+        Args:
+            root: Tk root window
+            process_callback: Function to call for audio processing
+        """
         self.root = root
-        self.root.title("Meeting Transcriber MVP")
-        self.active_thread = None
+        self.process_callback = process_callback
+        self.root.title("Meeting Transcriber")
+        self.root.geometry("800x600")
         
-        # Main frame
-        self.main_frame = ttk.Frame(root, padding="10")
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        # Configure styles
+        self.style = ttk.Style()
+        self.style.configure('TButton', padding=6)
+        self.style.configure('TLabel', padding=6)
         
-        # File selection
-        ttk.Label(self.main_frame, text="Select Audio File (.wav, .mp3, .m4a):").pack(anchor=tk.W)
+        # Create main widgets
+        self.create_widgets()
         
-        file_frame = ttk.Frame(self.main_frame)
-        file_frame.pack(fill=tk.X, pady=5)
+    def create_widgets(self):
+        """Create and arrange all GUI widgets."""
+        # File selection frame
+        file_frame = ttk.Frame(self.root, padding="10")
+        file_frame.pack(fill=tk.X)
         
-        self.file_path = tk.StringVar()
-        self.file_entry = ttk.Entry(file_frame, textvariable=self.file_path, state='readonly')
-        self.file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(file_frame, text="Audio File:").pack(side=tk.LEFT)
+        self.file_entry = ttk.Entry(file_frame, width=50)
+        self.file_entry.pack(side=tk.LEFT, padx=5)
         
-        ttk.Button(file_frame, text="Browse...", command=self.browse_file).pack(side=tk.LEFT, padx=5)
+        browse_btn = ttk.Button(
+            file_frame, 
+            text="Browse...", 
+            command=self.browse_file
+        )
+        browse_btn.pack(side=tk.LEFT)
         
-        # Transcribe button
-        self.transcribe_btn = ttk.Button(self.main_frame, text="Transcribe", 
-                                      command=self.start_transcription, state=tk.DISABLED)
-        self.transcribe_btn.pack(pady=5)
-        
-        # Separator
-        ttk.Separator(self.main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
-        
-        # Status/Results
-        ttk.Label(self.main_frame, text="Status / Results:").pack(anchor=tk.W)
-        
-        self.output_text = tk.Text(self.main_frame, height=15, width=80, wrap=tk.WORD)
-        self.output_text.pack(fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(self.main_frame, command=self.output_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.output_text.config(yscrollcommand=scrollbar.set)
+        # Process button
+        process_btn = ttk.Button(
+            self.root,
+            text="Transcribe Meeting",
+            command=self.start_transcription
+        )
+        process_btn.pack(pady=10)
         
         # Status bar
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(self.main_frame, textvariable=self.status_var).pack(anchor=tk.W)
+        self.status_var = tk.StringVar()
+        self.status_var.set("Ready")
+        status_bar = ttk.Label(
+            self.root,
+            textvariable=self.status_var,
+            relief=tk.SUNKEN,
+            anchor=tk.W
+        )
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Results display
+        self.result_text = scrolledtext.ScrolledText(
+            self.root,
+            wrap=tk.WORD,
+            font=('Consolas', 10)
+        )
+        self.result_text.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
         
     def browse_file(self):
-        filetypes = [("Audio Files", "*.wav *.mp3 *.m4a"), ("All Files", "*.*")]
-        filename = filedialog.askopenfilename(filetypes=filetypes)
-        if filename:
-            self.file_path.set(filename)
-            if os.path.exists(filename):
-                self.transcribe_btn.config(state=tk.NORMAL)
-                self.status_var.set(f"Selected: {os.path.basename(filename)}")
-            else:
-                self.transcribe_btn.config(state=tk.DISABLED)
-                self.status_var.set("Please select a valid audio file.")
-    
+        """Open file dialog to select audio file."""
+        file_path = filedialog.askopenfilename(
+            title="Select Meeting Recording",
+            filetypes=[
+                ("Audio Files", "*.wav *.mp3 *.m4a"),
+                ("All Files", "*.*")
+            ]
+        )
+        if file_path:
+            self.file_entry.delete(0, tk.END)
+            self.file_entry.insert(0, file_path)
+            
     def start_transcription(self):
-        if self.active_thread is not None:
-            messagebox.showinfo("Busy", "Transcription is already in progress.")
+        """Start transcription process in a separate thread."""
+        file_path = self.file_entry.get()
+        if not file_path:
+            self.show_error("Please select an audio file first")
             return
             
-        file_path = self.file_path.get()
-        if not file_path or not os.path.exists(file_path):
-            messagebox.showerror("File Error", "Please select a valid audio file first.")
+        if not self.process_callback:
+            self.show_error("Processing function not available")
             return
             
-        self.transcribe_btn.config(state=tk.DISABLED)
-        self.output_text.delete(1.0, tk.END)
-        self.output_text.insert(tk.END, "Starting transcription process...\n")
-        self.status_var.set("Processing...")
+        self.update_status("Processing...")
+        self.result_text.delete(1.0, tk.END)
         
-        # Start transcription thread
-        self.active_thread = threading.Thread(
+        # Run processing in background thread
+        thread = threading.Thread(
             target=self.transcription_thread,
             args=(file_path,),
             daemon=True
         )
-        self.active_thread.start()
+        thread.start()
         
-        # Check thread status periodically
-        self.root.after(100, self.check_thread)
-    
     def transcription_thread(self, file_path):
+        """Thread function for processing audio."""
         try:
-            self.update_status("Starting audio processing...")
-            
-            # Validate file
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File not found: {file_path}")
-            if not any(file_path.lower().endswith(fmt) for fmt in SUPPORTED_FORMATS):
-                raise ValueError(f"Unsupported file format. Supported: {SUPPORTED_FORMATS}")
-            
-            self.update_status(f"Audio file validated: {os.path.basename(file_path)}")
-            self.update_status("Starting transcription (this may take time)...")
-            
-            # Transcribe
-            transcript = transcribe_audio(file_path, language="en")
-            
-            # Show result
-            self.show_result(transcript)
-            self.update_status("Transcription finished successfully.")
-            
+            segments = self.process_callback(file_path)
+            self.root.after(0, self.show_result, segments)
+            self.root.after(0, self.update_status, "Done")
         except Exception as e:
-            error_message = f"Error during transcription:\n{traceback.format_exc()}"
-            self.show_error(error_message)
-            self.update_status("Transcription failed. Check output for details.")
+            self.root.after(0, self.show_error, str(e))
             
-        finally:
-            self.active_thread = None
-            self.root.after(0, lambda: self.transcribe_btn.config(state=tk.NORMAL))
-    
-    def check_thread(self):
-        if self.active_thread and self.active_thread.is_alive():
-            self.root.after(100, self.check_thread)
-    
     def update_status(self, message):
-        self.root.after(0, lambda: self.output_text.insert(tk.END, f"{message}\n"))
-        self.root.after(0, lambda: self.status_var.set(message))
-        self.root.after(0, lambda: self.output_text.see(tk.END))
-    
-    def show_result(self, transcript):
-        self.root.after(0, lambda: self.output_text.insert(tk.END, 
-            f"\n--- Transcription Result ---\n{transcript}\n----------------------------\n"))
-        self.root.after(0, lambda: self.output_text.see(tk.END))
-    
+        """Update status bar message."""
+        self.status_var.set(message)
+        
+    def show_result(self, segments: List[TranscriptSegment]):
+        """Display transcription results with speaker labels."""
+        self.result_text.delete(1.0, tk.END)
+        
+        for segment in segments:
+            speaker = segment.speaker or "Unknown"
+            time_str = f"[{segment.start:.1f}-{segment.end:.1f}s]"
+            self.result_text.insert(tk.END, f"{time_str} {speaker}:\n")
+            self.result_text.insert(tk.END, f"{segment.text}\n\n")
+            
     def show_error(self, error_message):
-        self.root.after(0, lambda: self.output_text.insert(tk.END, 
-            f"\n--- ERROR ---\n{error_message}\n-------------\n"))
-        self.root.after(0, lambda: self.output_text.see(tk.END))
+        """Display error message."""
+        self.status_var.set(f"Error: {error_message}")
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.insert(tk.END, f"Error: {error_message}")
 
-def main():
+def run_gui(process_callback: Optional[Callable] = None):
+    """Run the GUI application.
+    
+    Args:
+        process_callback: Function to call for audio processing
+    """
     root = tk.Tk()
-    root.geometry("800x600")
-    app = MeetingTranscriberApp(root)
+    app = MeetingTranscriberApp(root, process_callback)
     root.mainloop()
-
-if __name__ == "__main__":
-    # Basic check for whisper.cpp dependencies before launching GUI
-    try:
-        from speech_to_text.transcriber import _check_executable, _check_model, WHISPER_CPP_EXECUTABLE, WHISPER_CPP_MODEL_PATH
-        # Check if executable and model seem accessible
-        if not _check_executable(WHISPER_CPP_EXECUTABLE) and not _check_executable(os.path.join(src_dir, "..", "whisper.cpp", WHISPER_CPP_EXECUTABLE)):
-            print(f"Warning: Whisper.cpp executable '{WHISPER_CPP_EXECUTABLE}' not found in PATH or expected relative location.")
-            messagebox.showwarning("Dependency Check", 
-                f"Whisper.cpp executable ('{WHISPER_CPP_EXECUTABLE}') not found.\nPlease ensure whisper.cpp is compiled and accessible.")
-        elif not _check_model(WHISPER_CPP_MODEL_PATH) and not _check_model(os.path.join(src_dir, "..", WHISPER_CPP_MODEL_PATH)):
-            print(f"Warning: Whisper.cpp model '{WHISPER_CPP_MODEL_PATH}' not found.")
-            messagebox.showwarning("Dependency Check", 
-                f"Whisper.cpp model ('{WHISPER_CPP_MODEL_PATH}') not found.\nPlease download a model (e.g., ggml-base.en.bin) and place it correctly.")
-        else:
-            print("Whisper.cpp executable and model appear to be present.")
-            main() # Run the GUI
-    except ImportError:
-        # Error already handled during initial imports
-        pass
-    except Exception as e:
-        messagebox.showerror("Startup Error", f"An unexpected error occurred before starting the GUI:\n{e}")
